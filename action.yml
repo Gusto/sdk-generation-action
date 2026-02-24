@@ -109,7 +109,7 @@ inputs:
     description: "Version of pnpm to install. Not recommended for use without consulting Speakeasy support."
     required: false
   skip_testing:
-    description: "Set to true to explicitly skip Speakeasy workflow target testing after generation, even when enabled in the Speakeasy workflow configuration. This is useful for running workflow testing as a separate GitHub Actions workflow without affecting/blocking generation."
+    description: "Skip Speakeasy workflow target testing after generation. In mode: pr, testing is always skipped during generation regardless of this input — tests should run separately via the sdk-test.yaml workflow (set up with 'speakeasy configure test'). This input only takes effect in mode: direct."
     default: "false"
     required: false
   poetry_version:
@@ -124,6 +124,14 @@ inputs:
     required: false
   enable_sdk_changelog:
     description: "Enable the new SDK changelog feature"
+    default: "false"
+    required: false
+  skip_release:
+    description: "Skip creating releases and registry tagging in direct mode"
+    default: "false"
+    required: false
+  skip_versioning:
+    description: "Skip versioning during SDK generation, preventing version bumps"
     default: "false"
     required: false
 outputs:
@@ -207,9 +215,11 @@ outputs:
     description: "The directory the SDK target was generated to"
   mcp_release_typescript:
     description: "The release tag used for standalone ts mcp binaries"
+  use_pypi_trusted_publishing:
+    description: "Whether to use OIDC trusted publishing for PyPI instead of token-based authentication"
 runs:
   using: "docker"
-  image: "docker://ghcr.io/speakeasy-api/sdk-generation-action:v15"
+  image: "Dockerfile"
   env:
     SPEAKEASY_API_KEY: ${{ inputs.speakeasy_api_key }}
     SPEAKEASY_SERVER_URL: ${{ inputs.speakeasy_server_url }}
@@ -243,3 +253,5 @@ runs:
     - ${{ inputs.pnpm_version }}
     - ${{ inputs.poetry_version }}
     - ${{ inputs.enable_sdk_changelog }}
+    - ${{ inputs.skip_release }}
+    - ${{ inputs.skip_versioning }}

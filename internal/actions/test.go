@@ -17,7 +17,7 @@ import (
 	"golang.org/x/exp/slices"
 )
 
-const testReportHeader = "SDK Tests Report"
+const testReportHeader = "SDK Test Report"
 
 type TestReport struct {
 	Success bool
@@ -43,36 +43,45 @@ func Test(ctx context.Context) error {
 		return err
 	}
 
-	// This will only come in via workflow dispatch, we do accept 'all' as a special case
-	var testedTargets []string
-	if providedTargetName := environment.SpecifiedTarget(); providedTargetName != "" && os.Getenv("GITHUB_EVENT_NAME") == "workflow_dispatch" {
-		testedTargets = append(testedTargets, providedTargetName)
+	// Always resolve the PR number
+	var prNumber *int
+	_, number, err := g.GetChangedFilesForPRorBranch()
+	if err != nil {
+		fmt.Printf("Failed to get PR info: %s\n", err.Error())
+	}
+	prNumber = number
+
+	// Resolve gen.lock IDs for all workflow targets so we can build report URLs
+	targetLockIDs := make(map[string]string)
+	for name, target := range wf.Targets {
+		targetOutput := ""
+		if target.Output != nil {
+			targetOutput = *target.Output
+		}
+		outDir := filepath.Join(environment.GetWorkingDirectory(), targetOutput)
+		cfg, err := config.Load(outDir)
+		if err != nil {
+			fmt.Printf("Failed to load config for target %s: %s\n", name, err.Error())
+			continue
+		}
+		if cfg.LockFile != nil {
+			targetLockIDs[name] = cfg.LockFile.ID
+		}
 	}
 
-	var prNumber *int
-	targetLockIDs := make(map[string]string)
-	if len(testedTargets) == 0 {
-		// We look for all files modified in the PR or Branch to see what SDK targets have been modified
-		files, number, err := g.GetChangedFilesForPRorBranch()
+	var testedTargets []string
+	if providedTargetName := environment.SpecifiedTarget(); providedTargetName != "" {
+		testedTargets = append(testedTargets, providedTargetName)
+	} else {
+		// No target specified — discover targets from changed files in the PR
+		files, _, err := g.GetChangedFilesForPRorBranch()
 		if err != nil {
-			fmt.Printf("Failed to get commited files: %s\n", err.Error())
+			fmt.Printf("Failed to get changed files: %s\n", err.Error())
 		}
-
-		prNumber = number
 
 		for _, file := range files {
 			if strings.Contains(file, "gen.yaml") || strings.Contains(file, "gen.lock") {
 				configDir := filepath.Dir(filepath.Dir(file)) // gets out of .speakeasy
-				cfg, err := config.Load(filepath.Join(environment.GetWorkspace(), "repo", configDir))
-				if err != nil {
-					return fmt.Errorf("failed to load config: %w", err)
-				}
-
-				var genLockID string
-				if cfg.LockFile != nil {
-					genLockID = cfg.LockFile.ID
-				}
-
 				outDir, err := filepath.Abs(configDir)
 				if err != nil {
 					return err
@@ -86,10 +95,8 @@ func Test(ctx context.Context) error {
 					if err != nil {
 						return err
 					}
-					// If there are multiple SDKs in a workflow we ensure output path is unique
 					if targetOutput == outDir && !slices.Contains(testedTargets, name) {
 						testedTargets = append(testedTargets, name)
-						targetLockIDs[name] = genLockID
 					}
 				}
 			}
@@ -115,11 +122,11 @@ func Test(ctx context.Context) error {
 		if genLockID, ok := targetLockIDs[target]; ok && genLockID != "" {
 			testReportURL = formatTestReportURL(ctx, genLockID)
 		} else {
-			fmt.Println(fmt.Sprintf("No gen.lock ID found for target %s", target))
+			fmt.Printf("No gen.lock ID found for target %s\n", target)
 		}
 
 		if testReportURL == "" {
-			fmt.Println(fmt.Sprintf("No test report URL could be formed for target %s", target))
+			fmt.Printf("No test report URL could be formed for target %s\n", target)
 		} else {
 			testReports[target] = TestReport{
 				Success: err == nil,
@@ -128,14 +135,16 @@ func Test(ctx context.Context) error {
 		}
 	}
 
-	if len(testReports) > 0 {
+	if len(testReports) > 0 && prNumber != nil {
 		if err := writeTestReportComment(g, prNumber, testReports); err != nil {
-			fmt.Println(fmt.Sprintf("Failed to write test report comment: %s\n", err.Error()))
+			fmt.Printf("Failed to write test report comment: %s\n", err.Error())
 		}
+	} else if len(testReports) > 0 && prNumber == nil {
+		fmt.Println("Skipping test report PR comment: could not determine PR number")
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("test failures occured: %w", errors.Join(errs...))
+		return fmt.Errorf("test failures occurred: %w", errors.Join(errs...))
 	}
 
 	return nil
@@ -171,33 +180,39 @@ func writeTestReportComment(g *git.Git, prNumber *int, testReports map[string]Te
 		return fmt.Errorf("PR number is nil, cannot post comment")
 	}
 
-	currentPRComments, _ := g.ListIssueComments(*prNumber)
-	for _, comment := range currentPRComments {
-		commentBody := comment.GetBody()
-		if strings.Contains(commentBody, testReportHeader) {
-			if err := g.DeleteIssueComment(comment.GetID()); err != nil {
-				fmt.Println(fmt.Sprintf("Failed to delete existing test report comment: %s\n", err.Error()))
+	currentPRComments, err := g.ListIssueComments(*prNumber)
+	if err != nil {
+		fmt.Printf("Failed to list PR comments: %s\n", err.Error())
+	}
+
+	// Each target gets its own comment to avoid race conditions when
+	// multiple targets run in parallel as separate workflow jobs.
+	for target, report := range testReports {
+		targetHeader := fmt.Sprintf("%s: %s", testReportHeader, target)
+
+		// Delete any existing comment for this specific target
+		for _, comment := range currentPRComments {
+			if strings.Contains(comment.GetBody(), targetHeader) {
+				if err := g.DeleteIssueComment(comment.GetID()); err != nil {
+					fmt.Printf("Failed to delete existing test report comment for %s: %s\n", target, err.Error())
+				}
 			}
 		}
-	}
 
-	titleComment := fmt.Sprintf("## **%s**\n\n", testReportHeader)
-
-	tableHeader := "| Target | Status | Report |\n|--------|--------|--------|\n"
-
-	var tableRows strings.Builder
-	for target, report := range testReports {
 		statusEmoji := "✅"
+		statusText := "passed"
 		if !report.Success {
 			statusEmoji = "❌"
+			statusText = "failed"
 		}
-		tableRows.WriteString(fmt.Sprintf("| %s | <p align='center'>%s</p> | [view report](%s) |\n", target, statusEmoji, report.URL))
+
+		body := fmt.Sprintf("%s **%s** — tests %s &nbsp; [View Report](%s)\n",
+			statusEmoji, targetHeader, statusText, report.URL)
+
+		if err := g.WriteIssueComment(*prNumber, body); err != nil {
+			fmt.Printf("Failed to write test report comment for %s: %s\n", target, err.Error())
+		}
 	}
 
-	// Combine everything
-	body := titleComment + tableHeader + tableRows.String()
-
-	err := g.WriteIssueComment(*prNumber, body)
-
-	return err
+	return nil
 }

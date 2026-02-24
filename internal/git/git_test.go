@@ -456,26 +456,17 @@ func TestGit_FindOrCreateBranch_NonCIPendingCommits(t *testing.T) {
 	repo, err := git.PlainOpen(repoPath)
 	require.NoError(t, err)
 
-	g := Git{repo: repo}
+	g := New("test-token")
+	g.repo = repo
 	runGitCLI(t, repoPath, "config", "pull.rebase", "false")
 
 	t.Setenv("GITHUB_WORKSPACE", workspace)
 	t.Setenv("INPUT_WORKING_DIRECTORY", "")
 
-	branchName, err := g.FindOrCreateBranch("regen", environment.ActionRunWorkflow)
-	require.NoError(t, err)
-	assert.Equal(t, "regen", branchName)
-
-	// Verify the manual commit was cherry-picked onto the fresh branch
-	runGitCLI(t, repoPath, "checkout", "regen")
-	content, err := os.ReadFile(filepath.Join(repoPath, "manual.txt"))
-	require.NoError(t, err)
-	assert.Equal(t, "manual change\n", string(content), "manual commit should be preserved via cherry-pick")
-
-	// Verify CI commit was discarded (generated.txt should be back to main's version)
-	generatedContent, err := os.ReadFile(filepath.Join(repoPath, "generated.txt"))
-	require.NoError(t, err)
-	assert.Equal(t, "original\n", string(generatedContent), "CI commit should be discarded, file should match main")
+	_, err = g.FindOrCreateBranch("regen", environment.ActionRunWorkflow)
+	require.Error(t, err)
+	expectedError := "external changes detected on branch regen. The action cannot proceed because non-automated commits were pushed to this branch.\n\nPlease either:\n- Merge the associated PR for this branch\n- Close the PR and delete the branch\n\nAfter merging or closing, the action will create a new branch on the next run"
+	assert.Equal(t, expectedError, err.Error())
 }
 
 func TestGit_FindOrCreateBranch_BotCommitAllowed(t *testing.T) {
@@ -846,6 +837,109 @@ func TestCreateOrUpdateDocsPR_SourceBranchAware(t *testing.T) {
 			assert.Equal(t, tt.expectedBaseBranch, targetBaseBranch)
 		})
 	}
+}
+
+func TestLegacyPRTitleWithoutBee(t *testing.T) {
+	// During a bug period, PR titles were created without the bee emoji.
+	// We need to ensure we can find those legacy PRs by stripping the bee.
+	withoutBee := func(s string) string {
+		return strings.ReplaceAll(s, "🐝 ", "")
+	}
+
+	tests := []struct {
+		name     string
+		current  string
+		expected string
+	}{
+		{
+			name:     "SDK PR title",
+			current:  speakeasyGenPRTitle,
+			expected: "chore: Update SDK - ",
+		},
+		{
+			name:     "Specs PR title",
+			current:  speakeasyGenSpecsTitle,
+			expected: "chore: Update Specs - ",
+		},
+		{
+			name:     "Docs PR title",
+			current:  speakeasyDocsPRTitle,
+			expected: "chore: Update SDK Docs - ",
+		},
+		{
+			name:     "Suggest PR title",
+			current:  speakeasySuggestPRTitle,
+			expected: "chore: Suggest OpenAPI changes - ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, withoutBee(tt.current))
+		})
+	}
+}
+
+func TestConfigureSystemGitAuth_DefaultHost(t *testing.T) {
+	repoDir := t.TempDir()
+	runGitCLI(t, repoDir, "init")
+
+	t.Setenv("GITHUB_SERVER_URL", "https://github.com")
+
+	g := &Git{accessToken: "test-token-123"}
+	err := g.configureSystemGitAuth(repoDir)
+	require.NoError(t, err)
+
+	output := runGitCLI(t, repoDir, "config", "--local", "--get-regexp", `url\..*\.insteadOf`)
+	assert.Contains(t, output, "https://gen:test-token-123@github.com/")
+	assert.Contains(t, output, "https://github.com/")
+}
+
+func TestConfigureSystemGitAuth_GHESHost(t *testing.T) {
+	repoDir := t.TempDir()
+	runGitCLI(t, repoDir, "init")
+
+	t.Setenv("GITHUB_SERVER_URL", "https://github.mycompany.com")
+
+	g := &Git{accessToken: "ghes-token-456"}
+	err := g.configureSystemGitAuth(repoDir)
+	require.NoError(t, err)
+
+	output := runGitCLI(t, repoDir, "config", "--local", "--get-regexp", `url\..*\.insteadOf`)
+	assert.Contains(t, output, "https://gen:ghes-token-456@github.mycompany.com/")
+	assert.Contains(t, output, "https://github.mycompany.com/")
+}
+
+func TestConfigureSystemGitAuth_EmptyToken(t *testing.T) {
+	repoDir := t.TempDir()
+	runGitCLI(t, repoDir, "init")
+
+	g := &Git{accessToken: ""}
+	err := g.configureSystemGitAuth(repoDir)
+	require.NoError(t, err)
+
+	// Should be a no-op — no config written
+	cmd := exec.Command("git", "config", "--local", "--get-regexp", `url\..*\.insteadOf`)
+	cmd.Dir = repoDir
+	output, err := cmd.CombinedOutput()
+	// git config --get-regexp returns exit code 1 when no matches found
+	assert.Error(t, err)
+	assert.Empty(t, strings.TrimSpace(string(output)))
+}
+
+func TestConfigureSystemGitAuth_FallbackHost(t *testing.T) {
+	repoDir := t.TempDir()
+	runGitCLI(t, repoDir, "init")
+
+	t.Setenv("GITHUB_SERVER_URL", "")
+
+	g := &Git{accessToken: "fallback-token"}
+	err := g.configureSystemGitAuth(repoDir)
+	require.NoError(t, err)
+
+	output := runGitCLI(t, repoDir, "config", "--local", "--get-regexp", `url\..*\.insteadOf`)
+	assert.Contains(t, output, "https://gen:fallback-token@github.com/")
+	assert.Contains(t, output, "https://github.com/")
 }
 
 func TestCreateSuggestionPR_SourceBranchAware(t *testing.T) {

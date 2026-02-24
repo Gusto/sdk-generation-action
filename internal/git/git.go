@@ -96,6 +96,44 @@ func (g *Git) CloneRepo() error {
 	}
 	g.repo = r
 
+	if err := g.configureSystemGitAuth(repoDir); err != nil {
+		logging.Info("Warning: failed to configure system git credentials: %v", err)
+	}
+
+	return nil
+}
+
+// configureSystemGitAuth configures the cloned repo's local git config so that
+// system git commands (invoked by speakeasy CLI subprocesses) can authenticate.
+// It sets url.<authenticated>.insteadOf so that any HTTPS URL for the GitHub host
+// is transparently rewritten to include credentials.
+func (g *Git) configureSystemGitAuth(repoDir string) error {
+	if g.accessToken == "" {
+		return nil
+	}
+
+	host := "github.com"
+	if serverURL := os.Getenv("GITHUB_SERVER_URL"); serverURL != "" {
+		parsed, err := url.Parse(serverURL)
+		if err == nil && parsed.Host != "" {
+			host = parsed.Host
+		}
+	}
+
+	authenticatedPrefix := fmt.Sprintf("https://gen:%s@%s/", g.accessToken, host)
+	originalPrefix := fmt.Sprintf("https://%s/", host)
+
+	cmd := exec.Command("git", "config", "--local",
+		fmt.Sprintf("url.%s.insteadOf", authenticatedPrefix),
+		originalPrefix,
+	)
+	cmd.Dir = repoDir
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git config failed: %w: %s", err, string(output))
+	}
+
 	return nil
 }
 
@@ -211,8 +249,11 @@ func (g *Git) FindExistingPR(branchName string, action environment.Action, sourc
 		prTitle = prTitle + " [" + sanitizedSourceBranch + "]"
 	}
 
+	// Also check for legacy PR titles (without the bee emoji)
+	legacyPrTitle := strings.ReplaceAll(prTitle, "🐝 ", "")
+
 	for _, p := range prs {
-		if strings.HasPrefix(p.GetTitle(), prTitle) {
+		if strings.HasPrefix(p.GetTitle(), prTitle) || strings.HasPrefix(p.GetTitle(), legacyPrTitle) {
 			logging.Info("Found existing PR %s", *p.Title)
 
 			if branchName != "" && p.GetHead().GetRef() != branchName {
@@ -315,26 +356,6 @@ func (g *Git) resetWorktree(worktree *git.Worktree, branchName string) error {
 	return nil
 }
 
-func (g *Git) cherryPick(commitHash string) error {
-	logging.Info("Cherry-picking commit %s", commitHash)
-
-	workDir := filepath.Join(environment.GetWorkspace(), "repo", environment.GetWorkingDirectory())
-
-	// Use -c flags to set identity temporarily for just this command
-	cmd := exec.Command("git",
-		"-c", "user.name="+speakeasyBotName,
-		"-c", "user.email=bot@speakeasyapi.dev",
-		"cherry-pick", "--allow-empty", commitHash)
-	cmd.Dir = workDir
-	cmd.Env = os.Environ()
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("error cherry-picking commit %s: %w %s", commitHash, err, string(output))
-	}
-
-	return nil
-}
-
 func (g *Git) FindOrCreateBranch(branchName string, action environment.Action) (string, error) {
 	if g.repo == nil {
 		return "", fmt.Errorf("repo not cloned")
@@ -366,22 +387,26 @@ func (g *Git) FindOrCreateBranch(branchName string, action environment.Action) (
 				return "", err
 			}
 
+			// If there are non-CI commits, fail immediately with an error
+			if len(nonCICommits) > 0 {
+				logging.Info("Found %d non-CI commits on branch %s", len(nonCICommits), branchName)
+
+				// Try to find the associated PR to provide a direct link
+				_, pr, prErr := g.FindExistingPR(branchName, action, false)
+				if prErr == nil && pr != nil {
+					prURL := pr.GetHTMLURL()
+					return "", fmt.Errorf("external changes detected on branch %s. The action cannot proceed because non-automated commits were pushed to this branch.\n\nPlease either:\n- Merge the PR: %s\n- Close the PR and delete the branch\n\nAfter merging or closing, the action will create a new branch on the next run", branchName, prURL)
+				}
+
+				// Fallback error if PR not found
+				return "", fmt.Errorf("external changes detected on branch %s. The action cannot proceed because non-automated commits were pushed to this branch.\n\nPlease either:\n- Merge the associated PR for this branch\n- Close the PR and delete the branch\n\nAfter merging or closing, the action will create a new branch on the next run", branchName)
+			}
+
 			// Reset to clean baseline from main
 			origin := fmt.Sprintf("origin/%s", defaultBranch)
 			if err = g.Reset("--hard", origin); err != nil {
 				// Swallow this error for now. Functionality will be unchanged from previous behavior if it fails
 				logging.Info("failed to reset branch: %s", err.Error())
-			}
-
-			// We will attempt to cherry-pick non Speakeasy generated commits onto the fresh branch
-			if len(nonCICommits) > 0 {
-				logging.Info("Cherry-picking %d non-CI commits onto fresh branch", len(nonCICommits))
-				// Reverse the order since git log returns newest first, but we want to apply oldest first
-				for i := len(nonCICommits) - 1; i >= 0; i-- {
-					if err := g.cherryPick(nonCICommits[i]); err != nil {
-						return "", fmt.Errorf("failed to cherry-pick commit %s: %w\n\nThis likely means manual changes are modifying a generated portion of the SDK.", nonCICommits[i][:8], err)
-					}
-				}
 			}
 
 			return existingBranch, nil
@@ -799,18 +824,27 @@ func (g *Git) CreateOrUpdatePR(info PRInfo) (*github.PullRequest, error) {
 		previousGenVersions = strings.Split(info.PreviousGenVersion, ";")
 	}
 
-	// Deprecated -- kept around for old CLI versions. VersioningReport is newer pathway
-	if info.ReleaseInfo != nil && info.VersioningInfo.VersionReport == nil {
-		changelog, err = g.generateGeneratorChangelogForOldCLIVersions(info, previousGenVersions, changelog)
-		if err != nil {
-			return nil, err
+	// Try to generate PR description via CLI first (new pathway)
+	// Falls back to legacy generatePRTitleAndBody if CLI doesn't support the command
+	cliOutput := g.tryGeneratePRDescriptionViaCLI(info)
+	if cliOutput != nil {
+		title = cliOutput.Title
+		body = cliOutput.Body
+	} else {
+		// Legacy fallback for older CLI versions
+		// Deprecated -- kept around for old CLI versions. VersioningReport is newer pathway
+		if info.ReleaseInfo != nil && info.VersioningInfo.VersionReport == nil {
+			changelog, err = g.generateGeneratorChangelogForOldCLIVersions(info, previousGenVersions, changelog)
+			if err != nil {
+				return nil, err
+			}
 		}
-	}
 
-	// We will use the old PR body if the INPUT_ENABLE_SDK_CHANGELOG env is not set or set to false
-	// We will use the new PR body if INPUT_ENABLE_SDK_CHANGELOG is set to true.
-	// Backwards compatible: If a client uses new sdk-action with old cli we will not get new changelog body
-	title, body = g.generatePRTitleAndBody(info, labelTypes, changelog)
+		// We will use the old PR body if the INPUT_ENABLE_SDK_CHANGELOG env is not set or set to false
+		// We will use the new PR body if INPUT_ENABLE_SDK_CHANGELOG is set to true.
+		// Backwards compatible: If a client uses new sdk-action with old cli we will not get new changelog body
+		title, body = g.generatePRTitleAndBody(info, labelTypes, changelog)
+	}
 
 	_, _, labels := PRVersionMetadata(info.VersioningInfo.VersionReport, labelTypes)
 
@@ -927,6 +961,7 @@ func (g *Git) generatePRTitleAndBody(info PRInfo, labelTypes map[string]github.L
 		if labelBumpType != nil && *labelBumpType != versioning.BumpCustom && *labelBumpType != versioning.BumpNone {
 			// be very careful if changing this it critically aligns with a regex in parseBumpFromPRBody
 			versionBumpMsg := "Version Bump Type: " + fmt.Sprintf("[%s]", string(*labelBumpType)) + " - "
+
 			if info.VersioningInfo.ManualBump {
 				versionBumpMsg += string(versionbumps.BumpMethodManual) + " (manual)"
 				// if manual we bold the message
@@ -934,6 +969,16 @@ func (g *Git) generatePRTitleAndBody(info PRInfo, labelTypes map[string]github.L
 				versionBumpMsg += fmt.Sprintf("\n\nThis PR will stay on the current version until the %s label is removed and/or modified.", string(*labelBumpType))
 			} else {
 				versionBumpMsg += string(versionbumps.BumpMethodAutomated) + " (automated)"
+
+				versionBumpMsg += "\n\n> [!TIP]"
+				switch *labelBumpType {
+				case versioning.BumpPrerelease:
+					versionBumpMsg += "\n> To exit [pre-release versioning](https://www.speakeasy.com/docs/sdks/manage/versioning#pre-release-version-bumps), set a new version or run `speakeasy bump graduate`."
+				case versioning.BumpPatch, versioning.BumpMinor:
+					versionBumpMsg += "\n> If updates to your OpenAPI document introduce breaking changes, be sure to update the `info.version` field to [trigger the correct version bump](https://www.speakeasy.com/docs/sdks/manage/versioning#openapi-document-changes)."
+				}
+
+				versionBumpMsg += "\n> Speakeasy supports manual control of SDK versioning through [multiple methods](https://www.speakeasy.com/docs/sdks/manage/versioning#manual-version-bumps)."
 			}
 			body += fmt.Sprintf(`## Versioning
 
@@ -964,6 +1009,37 @@ Based on [Speakeasy CLI](https://github.com/speakeasy-api/speakeasy) %s
 	}
 
 	return title, body
+}
+
+// tryGeneratePRDescriptionViaCLI attempts to generate PR title and body via the CLI.
+// Returns nil if the CLI doesn't support the command or if generation fails.
+func (g *Git) tryGeneratePRDescriptionViaCLI(info PRInfo) *cli.PRDescriptionOutput {
+	// Build CLI input from PRInfo
+	input := cli.PRDescriptionInput{
+		LintingReportURL: info.LintingReportURL,
+		ChangesReportURL: info.ChangesReportURL,
+		WorkflowName:     environment.GetWorkflowName(),
+		SourceBranch:     environment.GetSourceBranch(),
+		FeatureBranch:    environment.GetFeatureBranch(),
+		SpecifiedTarget:  environment.SpecifiedTarget(),
+		SourceGeneration: info.SourceGeneration,
+		DocsGeneration:   environment.IsDocsGeneration(),
+		ManualBump:       info.VersioningInfo.ManualBump,
+		VersionReport:    info.VersioningInfo.VersionReport,
+	}
+
+	// Get Speakeasy version for footer
+	if info.ReleaseInfo != nil {
+		input.SpeakeasyVersion = info.ReleaseInfo.SpeakeasyVersion
+	}
+
+	output, err := cli.GeneratePRDescription(input)
+	if err != nil {
+		logging.Info("Error generating PR description via CLI: %v", err)
+		return nil
+	}
+
+	return output
 }
 
 // --- Helper function for changelog generation for old CLI versions ---
@@ -1329,6 +1405,12 @@ func getDownloadLinkFromReleases(releases []*github.RepositoryRelease, version s
 	var defaultTagName *string
 
 	for _, release := range releases {
+		// Skip draft and prerelease entries — their download URLs are
+		// untagged and will 404.
+		if release.GetDraft() || release.GetPrerelease() {
+			continue
+		}
+
 		for _, asset := range release.Assets {
 			if version == "latest" || version == release.GetTagName() {
 				downloadUrl := asset.GetBrowserDownloadURL()

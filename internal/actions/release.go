@@ -22,7 +22,6 @@ func Release() error {
 	if accessToken == "" {
 		return errors.New("github access token is required")
 	}
-	fmt.Println("INPUT_ENABLE_SDK_CHANGELOG: ", environment.GetSDKChangelog())
 
 	g, err := initAction()
 	if err != nil {
@@ -245,7 +244,7 @@ func addCurrentBranchTagging(g *git.Git, latestRelease map[string]releases.Langu
 	}
 
 	if (len(sources) > 0 || len(targets) > 0) && branch != "" {
-		tags := []string{branch}
+		tags := []string{environment.SanitizeBranchName(branch)}
 		if isPublished {
 			tags = append(tags, "published")
 		}

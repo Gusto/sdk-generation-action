@@ -1,5 +1,6 @@
 ## Build
-FROM golang:1.23-alpine3.21 AS builder
+# CACHE_BUST: v15.55.2-alpha.2
+FROM golang:1.24-alpine3.22 AS builder
 
 WORKDIR /app
 
@@ -15,7 +16,11 @@ COPY pkg/ ./pkg/
 RUN go build -o /action
 
 ## Deploy
-FROM golang:1.23-alpine3.21
+FROM golang:1.24-alpine3.22
+
+# Enable Go toolchain automatic upgrades to prevent Go version errors in
+# customer generations (GOTOOLCHAIN=local default in golang images)
+ENV GOTOOLCHAIN=auto
 
 RUN apk update
 
@@ -33,7 +38,8 @@ RUN apk add --update --no-cache openjdk11 gradle
 
 ### Install Ruby
 #### gcompat is required on Alpine linux to support gcc ruby packages like sorbet
-RUN apk add --update --no-cache build-base ruby ruby-bundler ruby-dev gcompat
+#### yaml-dev is required on Alpine Linux to support psych gem compilation for irb/rdoc
+RUN apk add --update --no-cache build-base ruby ruby-bundler ruby-dev gcompat yaml-dev
 
 ### Install .NET
 ENV DOTNET_ROOT=/usr/lib/dotnet

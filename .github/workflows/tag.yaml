@@ -1,5 +1,4 @@
 name: Speakeasy Registry Tagger
-
 on:
   workflow_call:
     inputs:
@@ -31,11 +30,15 @@ jobs:
     name: Apply Tags in Speakeasy Registry
     runs-on: ubuntu-latest
     steps:
-      - name: Tune GitHub-hosted runner network
-        uses: smorimoto/tune-github-hosted-runner-network@v1
+      - name: Checkout sdk-generation-action repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: speakeasy-api/sdk-generation-action
+          ref: d209f94c685eb681f61f8c4a478e5c0cf64a1ebc
+          path: _speakeasy
       - id: apply-tags
         name: Apply Tags
-        uses: speakeasy-api/sdk-generation-action@v15
+        uses: ./_speakeasy
         with:
           action: "tag"
           sources: ${{ inputs.sources }}
@@ -44,3 +47,5 @@ jobs:
           registry_tags: ${{ inputs.registry_tags }}
           speakeasy_api_key: ${{ secrets.speakeasy_api_key }}
           github_access_token: ${{ secrets.github_access_token }}
+        env:
+          GH_ACTION_VERSION: d209f94c685eb681f61f8c4a478e5c0cf64a1ebc
