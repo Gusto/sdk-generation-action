@@ -622,13 +622,13 @@ jobs:
           repository: speakeasy-api/sdk-generation-action
           ref: d209f94c685eb681f61f8c4a478e5c0cf64a1ebc
           path: _speakeasy
-      # - name: Publish
-      #   uses: speakeasy-api/packagist-update@5e2c88e23c7d21e40c7a02a3b252a749b351eb2f # support-github-creation
-      #   with:
-      #     username: ${{ secrets.packagist_username }}
-      #     api_token: ${{ secrets.packagist_token }}
-      #     repository_name: ${{ github.repository }}
-      #     repository_base_url: ${{ github.server_url }}
+      - name: Publish
+        uses: speakeasy-api/packagist-update@5e2c88e23c7d21e40c7a02a3b252a749b351eb2f # support-github-creation
+        with:
+          username: ${{ secrets.packagist_username }}
+          api_token: ${{ secrets.packagist_token }}
+          repository_name: ${{ github.repository }}
+          repository_base_url: ${{ github.server_url }}
       - id: publish-event
         uses: ./_speakeasy
         if: always()

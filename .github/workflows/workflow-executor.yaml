@@ -340,11 +340,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install build
           python -m build
-      - name: Publish to PyPI (Trusted Publishing)
-        if: ${{ needs.run-workflow.outputs.use_pypi_trusted_publishing == 'true' }}
-        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4
-        with:
-          packages-dir: ${{ needs.run-workflow.outputs.python_directory }}/dist/
+      # - name: Publish to PyPI (Trusted Publishing)
+      #   if: ${{ needs.run-workflow.outputs.use_pypi_trusted_publishing == 'true' }}
+      #   uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4
+      #   with:
+      #     packages-dir: ${{ needs.run-workflow.outputs.python_directory }}/dist/
       - name: Publish with script (Token)
         if: ${{ needs.run-workflow.outputs.use_pypi_trusted_publishing != 'true' && steps.check-publish.outputs.publish_with_script == 'true' }}
         env:
