@@ -298,7 +298,7 @@ func getInstallationURL(lang, subdirectory string) string {
 	subdirectory = filepath.Clean(subdirectory)
 
 	switch lang {
-	case "go":
+	case "cli", "go":
 		base := fmt.Sprintf("%s/%s", environment.GetGithubServerURL(), environment.GetRepo())
 
 		if subdirectory == "." {
@@ -310,7 +310,7 @@ func getInstallationURL(lang, subdirectory string) string {
 		if subdirectory == "." {
 			return fmt.Sprintf("%s/%s", environment.GetGithubServerURL(), environment.GetRepo())
 		} else {
-			return fmt.Sprintf("https://gitpkg.now.sh/%s/%s", environment.GetRepo(), subdirectory)
+			return ""
 		}
 	case "python":
 		base := fmt.Sprintf("%s/%s.git", environment.GetGithubServerURL(), environment.GetRepo())
@@ -345,14 +345,20 @@ func getRepoURL() string {
 
 func AddTargetPublishOutputs(target workflow.Target, outputs map[string]string, installationURL *string) {
 	lang := target.Target
-	published := target.IsPublished() || lang == "go"
+	published := target.IsPublished() || lang == "go" || lang == "cli"
 
 	// TODO: Temporary check to fix Java. We may remove this entirely, pending conversation
 	if installationURL != nil && *installationURL == "" && lang != "java" {
 		published = true // Treat as published if we don't have an installation URL
 	}
 
-	outputs[utils.OutputTargetPublish(lang)] = fmt.Sprintf("%t", published)
+	// Use OR logic: don't let a non-published target overwrite a previously
+	// set published=true (e.g. workflow.local.yaml targets without publish blocks
+	// sharing the same output directory as the main target).
+	outputKey := utils.OutputTargetPublish(lang)
+	if existing, ok := outputs[outputKey]; !ok || existing != "true" || published {
+		outputs[outputKey] = strconv.FormatBool(published)
+	}
 
 	if published && lang == "java" && target.Publishing != nil && target.Publishing.Java != nil {
 		outputs["use_sonatype_legacy"] = strconv.FormatBool(target.Publishing.Java.UseSonatypeLegacy)

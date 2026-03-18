@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -28,6 +27,7 @@ func IsAtLeastVersion(version *version.Version) bool {
 }
 
 var defaultSupportedTargets = []string{
+	"cli",
 	"csharp",
 	"go",
 	"java",
@@ -42,6 +42,7 @@ var defaultSupportedTargets = []string{
 
 // Targets for the new changelog - JULY 2025
 var DefaultSupportedTargetsForChangelog = []string{
+	"cli",
 	"typescript",
 	"python",
 	"go",
@@ -68,13 +69,13 @@ func GetSupportedTargetNames() []string {
 
 func TriggerGoGenerate() error {
 	tidyCmd := exec.Command("go", "mod", "tidy")
-	tidyCmd.Dir = filepath.Join(environment.GetWorkspace(), "repo", environment.GetWorkingDirectory())
+	tidyCmd.Dir = environment.GetRepoPath()
 	output, err := tidyCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("error running command: go mod tidy - %w\n %s", err, string(output))
 	}
 	generateCmd := exec.Command("go", "generate", "./...")
-	generateCmd.Dir = filepath.Join(environment.GetWorkspace(), "repo", environment.GetWorkingDirectory())
+	generateCmd.Dir = environment.GetRepoPath()
 	output, err = generateCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("error running command: go generate ./... - %w\n %s", err, output)
@@ -162,7 +163,7 @@ func GetChangelog(lang, genVersion, previousGenVersion string, targetVersions ma
 func Suggest(docPath, maxSuggestions, docOutputPath string) (string, error) {
 	out, err := runSpeakeasyCommand("suggest", "--schema", docPath, "--auto-approve", "--output-file", docOutputPath, "--max-suggestions", maxSuggestions, "--level", "hint", "--serial")
 	if err != nil {
-		return out, fmt.Errorf("error suggesting openapi fixes: %w - %s", err, "")
+		return out, fmt.Errorf("error suggesting openapi fixes: %w", err)
 	}
 
 	return out, nil
@@ -179,11 +180,10 @@ func MergeDocuments(files []string, output string) error {
 		args = append(args, "-s", f)
 	}
 
-	out, err := runSpeakeasyCommand(args...)
+	_, err := runSpeakeasyCommand(args...)
 	if err != nil {
-		return fmt.Errorf("error merging documents: %w - %s", err, out)
+		return fmt.Errorf("error merging documents: %w", err)
 	}
-	fmt.Println(out)
 	return nil
 }
 
@@ -199,7 +199,7 @@ func ApplyOverlay(overlayPath, inPath, outPath string) error {
 
 	out, err := runSpeakeasyCommand(args...)
 	if err != nil {
-		return fmt.Errorf("error applying overlay: %w - %s", err, out)
+		return fmt.Errorf("error applying overlay: %w", err)
 	}
 
 	if err := os.WriteFile(outPath, []byte(out), os.ModePerm); err != nil {

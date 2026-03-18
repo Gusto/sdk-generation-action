@@ -58,7 +58,7 @@ func Test(ctx context.Context) error {
 		if target.Output != nil {
 			targetOutput = *target.Output
 		}
-		outDir := filepath.Join(environment.GetWorkingDirectory(), targetOutput)
+		outDir := filepath.Join(environment.GetRepoPath(), targetOutput)
 		cfg, err := config.Load(outDir)
 		if err != nil {
 			fmt.Printf("Failed to load config for target %s: %s\n", name, err.Error())
@@ -122,16 +122,16 @@ func Test(ctx context.Context) error {
 		if genLockID, ok := targetLockIDs[target]; ok && genLockID != "" {
 			testReportURL = formatTestReportURL(ctx, genLockID)
 		} else {
-			fmt.Printf("No gen.lock ID found for target %s\n", target)
+			fmt.Printf("No gen.lock ID found for target %s (available targets: %v)\n", target, targetLockIDs)
 		}
 
 		if testReportURL == "" {
 			fmt.Printf("No test report URL could be formed for target %s\n", target)
-		} else {
-			testReports[target] = TestReport{
-				Success: err == nil,
-				URL:     testReportURL,
-			}
+		}
+
+		testReports[target] = TestReport{
+			Success: err == nil,
+			URL:     testReportURL,
 		}
 	}
 
@@ -172,7 +172,7 @@ func formatTestReportURL(ctx context.Context, genLockID string) string {
 		return ""
 	}
 
-	return fmt.Sprintf("https://app.speakeasy.com/org/%s/%s/targets/%s/tests/%s", orgSlug, workspaceSlug, genLockID, executionID)
+	return fmt.Sprintf("https://app.speakeasy.com/org/%s/%s/generate/sdks/%s/tests/%s", orgSlug, workspaceSlug, genLockID, executionID)
 }
 
 func writeTestReportComment(g *git.Git, prNumber *int, testReports map[string]TestReport) error {
@@ -206,8 +206,14 @@ func writeTestReportComment(g *git.Git, prNumber *int, testReports map[string]Te
 			statusText = "failed"
 		}
 
-		body := fmt.Sprintf("%s **%s** — tests %s &nbsp; [View Report](%s)\n",
-			statusEmoji, targetHeader, statusText, report.URL)
+		var body string
+		if report.URL != "" {
+			body = fmt.Sprintf("%s **%s** — tests %s &nbsp; [View Report](%s)\n",
+				statusEmoji, targetHeader, statusText, report.URL)
+		} else {
+			body = fmt.Sprintf("%s **%s** — tests %s\n",
+				statusEmoji, targetHeader, statusText)
+		}
 
 		if err := g.WriteIssueComment(*prNumber, body); err != nil {
 			fmt.Printf("Failed to write test report comment for %s: %s\n", target, err.Error())
